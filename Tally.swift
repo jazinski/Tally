@@ -1082,9 +1082,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             paneScroll.topAnchor.constraint(equalTo: root.topAnchor),
             paneScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             paneScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            nav.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
-            nav.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            nav.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            nav.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+            nav.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+            nav.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 12),
         ])
         return root
     }
