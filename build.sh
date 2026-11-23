@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 APP="Tally"
-VERSION="0.0.1"
+VERSION="0.1.0"
 DEVID=$(security find-identity -v -p codesigning | grep -o '"Developer ID Application:[^"]*"' | head -1 | tr -d '"')
 echo "▸ $APP — building..."
 pkill -x "$APP" 2>/dev/null && sleep 1 || true
@@ -26,8 +26,8 @@ cat > "$APP.app/Contents/Info.plist" << 'PLIST'
     <key>CFBundleExecutable</key><string>Tally</string>
     <key>CFBundleIdentifier</key><string>com.jazinski.tally</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSUIElement</key><true/>
     <key>SUFeedURL</key><string>https://sashay.dev/tally-appcast.xml</string>
     <key>SUPublicEDKey</key><string>04uW74rV4uq9oLDVi3RuyL8kbBRcvWi8MejOsPBUZkE=</string>

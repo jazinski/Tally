@@ -5,13 +5,15 @@
 //  Panel + app shell. Engines live in ActivityEngine.swift (tracking) and
 //  FocusEngine.swift (pomodoro); this file only wires them to the chassis:
 //  status card, day strip, focus card, rules card, license card, menu-bar
-//  status item. Local-only, zero network ever.
+//  status item, and the sidebar Settings window (Direction A chassis from
+//  Align — SettingsWindowController/NavButton/PaneScrollView copy verbatim).
+//  Local-only, zero network ever.
 //
 //  Conventions per Sashay/AGENTS.md: 344pt panel, floor-clamped labels,
 //  GCD DispatchSource timers (never RunLoop Timer), dark Aqua, mono digits
 //  for ticking numbers, flock single-instance guard.
 //
-//  v0.0.1 · Built for client #1.
+//  v0.1.0 · Built for client #1.
 //
 
 import AppKit
@@ -24,7 +26,7 @@ enum Theme {
     static let accent   = NSColor(red: 1.0, green: 0.58, blue: 0.10, alpha: 1)
     static let wordmark = "Tally"
     static let tagline  = "Where did your day go?"
-    static let version  = "v0.0.1"
+    static let version  = "v0.1.0"
 }
 
 // MARK: - Category colors (engine stores system-color hints as strings)
@@ -522,12 +524,13 @@ final class PanelController: NSViewController {
     // MARK: - Footer
 
     private func footerRow() -> NSView {
-        let privacy = label("Local-only. Nothing ever leaves this Mac.", 11, color: .secondaryLabelColor)
+        let privacy = label("Local-only, zero telemetry.", 11, color: .secondaryLabelColor)
+        let settings = linkButton("Settings ⌘,", #selector(openSettings))
         let updates = linkButton("Updates", #selector(checkForUpdatesTapped))
         let quit = linkButton("Quit", #selector(quitApp))
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let row = NSStackView(views: [privacy, spacer, updates, quit])
+        let row = NSStackView(views: [privacy, spacer, settings, updates, quit])
         row.spacing = 8
         return row
     }
@@ -821,6 +824,10 @@ final class PanelController: NSViewController {
         LicenseManager.shared.deactivate()
     }
 
+    @objc private func openSettings() {
+        (NSApp.delegate as? AppDelegate)?.openSettings()
+    }
+
     @objc private func checkForUpdatesTapped() { updater.checkForUpdates(nil) }
 
     @objc private func quitApp() { NSApp.terminate(nil) }
@@ -892,6 +899,688 @@ final class LinkButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
+// MARK: - Launch at Login (LaunchAgent)
+
+enum LoginItem {
+    private static let label = "com.jazinski.tally"
+
+    private static var plistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+
+    static var isEnabled: Bool {
+        FileManager.default.fileExists(atPath: plistURL.path)
+    }
+
+    static func setEnabled(_ on: Bool) {
+        if on {
+            let exe = URL(fileURLWithPath: CommandLine.arguments[0])
+                .resolvingSymlinksInPath().path
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key><string>\(label)</string>
+                <key>ProgramArguments</key>
+            <array><string>\(exe)</string></array>
+                <key>RunAtLoad</key><true/>
+            </dict>
+            </plist>
+            """
+            try? FileManager.default.createDirectory(
+                at: plistURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try? plist.write(to: plistURL, atomically: true, encoding: .utf8)
+            runLaunchctl("load", plistURL.path)
+        } else {
+            runLaunchctl("unload", plistURL.path)
+            try? FileManager.default.removeItem(at: plistURL)
+        }
+    }
+
+    private static func runLaunchctl(_ args: String...) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        try? p.run()
+        p.waitUntilExit()
+    }
+}
+
+// MARK: - Settings window (Direction A — sidebar chassis from Align)
+
+/// Rectangle/System-Settings-style window: 200pt source-list sidebar left,
+/// grouped cards right. Portfolio chassis — SettingsWindowController,
+/// NavButton and PaneScrollView copy into any app with no dependencies
+/// beyond AppKit (Sparkle only feeds the update row). Owned by AppDelegate;
+/// torn down on close so every open rebuilds fresh.
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+
+    enum Section: Int, CaseIterable {
+        case general, tracking, focus, license, about
+
+        var title: String {
+            switch self {
+            case .general: return "General"
+            case .tracking: return "Tracking"
+            case .focus: return "Focus"
+            case .license: return "License"
+            case .about: return "About"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .general: return "gearshape"
+            case .tracking: return "chart.bar"
+            case .focus: return "timer"
+            case .license: return "lock"
+            case .about: return "info.circle"
+            }
+        }
+
+        var isNew: Bool { false }
+    }
+
+    private let activity: ActivityEngine
+    private let focus: FocusEngine
+    private let updater: SPUStandardUpdaterController
+    private var cancellables = Set<AnyCancellable>()
+    private var navButtons: [NavButton] = []
+    private var paneScroll: PaneScrollView!
+    private var section = Section.general
+    private var trackingSwitch: NSSwitch?
+    private var stepperRows: [(stepper: NSStepper, readout: NSTextField,
+                               format: (Int) -> String)] = []
+    private var licenseKeyField: NSTextField?
+    private var licenseError: NSTextField?
+
+    /// The owner nils its reference here so controller and window deallocate
+    /// once close() has unwound — that IS the rebuild-fresh-on-open behavior.
+    var onTeardown: (() -> Void)?
+
+    init(activity: ActivityEngine, focus: FocusEngine,
+         updater: SPUStandardUpdaterController) {
+        self.activity = activity
+        self.focus = focus
+        self.updater = updater
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered, defer: false)
+        window.title = "Tally Settings"
+        window.appearance = NSAppearance(named: .darkAqua)
+        // ARC plus the strong owner make isReleasedWhenClosed an over-release;
+        // deferred teardown (windowWillClose) delivers the same lifecycle.
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.center()
+        super.init(window: window)
+        window.delegate = self
+        window.contentView = buildRoot()
+        select(.general)
+        wireState()
+    }
+
+    required init?(coder: NSCoder) { fatalError("nope") }
+
+    // MARK: Chassis
+
+    private func buildRoot() -> NSView {
+        let root = NSView()
+        root.appearance = NSAppearance(named: .darkAqua)
+
+        let sidebar = NSView()
+        sidebar.wantsLayer = true
+        sidebar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        root.addSubview(sidebar)
+
+        let hairline = NSView()
+        hairline.wantsLayer = true
+        hairline.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        root.addSubview(hairline)
+
+        let nav = NSStackView()
+        nav.orientation = .vertical
+        nav.alignment = .leading
+        nav.spacing = 4
+        nav.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        sidebar.addSubview(nav)
+
+        for section in Section.allCases {
+            let button = NavButton(section: section,
+                                   target: self, action: #selector(navTapped(_:)))
+            navButtons.append(button)
+            nav.addArrangedSubview(button)
+            button.widthAnchor.constraint(equalTo: nav.widthAnchor).isActive = true
+        }
+
+        paneScroll = PaneScrollView()
+        paneScroll.hasVerticalScroller = true
+        paneScroll.scrollerStyle = .overlay
+        paneScroll.borderType = .noBorder
+        paneScroll.drawsBackground = false
+        paneScroll.contentView.drawsBackground = false
+        root.addSubview(paneScroll)
+
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        nav.translatesAutoresizingMaskIntoConstraints = false
+        paneScroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 200),
+            hairline.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            hairline.topAnchor.constraint(equalTo: root.topAnchor),
+            hairline.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            hairline.widthAnchor.constraint(equalToConstant: 1),
+            paneScroll.leadingAnchor.constraint(equalTo: hairline.trailingAnchor),
+            paneScroll.topAnchor.constraint(equalTo: root.topAnchor),
+            paneScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            paneScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            nav.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            nav.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            nav.topAnchor.constraint(equalTo: sidebar.topAnchor),
+        ])
+        return root
+    }
+
+    private func select(_ section: Section) {
+        self.section = section
+        for button in navButtons { button.isActive = button.section == section }
+        rebuildPane()
+    }
+
+    private func rebuildPane() {
+        stepperRows.removeAll()
+        trackingSwitch = nil
+        licenseKeyField = nil
+        licenseError = nil
+
+        let document = NSView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+
+        let heading = NSTextField(labelWithString: section.title)
+        heading.attributedStringValue = NSAttributedString(
+            string: section.title,
+            attributes: [.font: NSFont.systemFont(ofSize: 19, weight: .bold),
+                         .kern: -0.4,
+                         .foregroundColor: NSColor.labelColor])
+
+        let stack = NSStackView(views: [heading] + sectionGroups())
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: document.bottomAnchor,
+                                          constant: -20),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
+        ])
+        for group in stack.arrangedSubviews.dropFirst() {
+            group.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        paneScroll.documentView = document
+        document.widthAnchor.constraint(
+            equalTo: paneScroll.contentView.widthAnchor).isActive = true
+        document.heightAnchor.constraint(
+            greaterThanOrEqualTo: paneScroll.contentView.heightAnchor).isActive = true
+        paneScroll.contentView.scroll(to: .zero)
+    }
+
+    private func sectionGroups() -> [NSView] {
+        switch section {
+        case .general: return buildGeneral()
+        case .tracking: return buildTracking()
+        case .focus: return buildFocus()
+        case .license: return buildLicense()
+        case .about: return buildAbout()
+        }
+    }
+
+    // MARK: Row builders (portfolio settings chassis)
+
+    /// Grouped card: cornerRadius 10, semantic fill, hairline between rows.
+    private func cardGroup(_ rows: [NSView]) -> NSView {
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 10
+        box.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.separatorColor.cgColor
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: box.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+        ])
+        for (index, row) in rows.enumerated() {
+            if index > 0 { addHairline(to: stack) }
+            addRow(row, to: stack)
+        }
+        return box
+    }
+
+    private func addRow(_ row: NSView, to stack: NSStackView) {
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func addHairline(to stack: NSStackView) {
+        let hairline = NSView()
+        hairline.wantsLayer = true
+        hairline.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        stack.addArrangedSubview(hairline)
+        hairline.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        hairline.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    /// Label column + trailing control on the mockup's grouped 12pt row.
+    /// Text yields horizontally (compression 499) so the chassis width pins
+    /// always win — long captions wrap instead of widening the window.
+    private func rowBase(title: String, detail: String?, monoDetail: Bool = false,
+                         trailing: NSView,
+                         titleColor: NSColor = .labelColor,
+                         titleWeight: NSFont.Weight = .regular) -> NSView {
+        let text = label(title, 13, weight: titleWeight, color: titleColor)
+        text.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+        var columnViews = [text]
+        if let detail {
+            columnViews.append(monoDetail
+                ? label(detail, 11, color: .secondaryLabelColor, mono: true)
+                : rowCaption(detail))
+        }
+        let column = NSStackView(views: columnViews)
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 2
+        column.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+
+        let row = NSStackView(views: [column, spacer, trailing])
+        row.alignment = .centerY
+        row.spacing = 12
+        row.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        return row
+    }
+
+    private func rowCaption(_ text: String) -> NSTextField {
+        let caption = label(text, 11, color: .secondaryLabelColor)
+        caption.cell?.wraps = true
+        caption.lineBreakMode = .byWordWrapping
+        caption.maximumNumberOfLines = 0
+        caption.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+        return caption
+    }
+
+    private func headerRow(title: String) -> NSView {
+        rowBase(title: title, detail: nil, trailing: NSView(),
+                titleColor: .secondaryLabelColor, titleWeight: .semibold)
+    }
+
+    private func infoRow(title: String, detail: String?, trailing: String,
+                         trailingColor: NSColor = .secondaryLabelColor,
+                         monoDetail: Bool = false) -> NSView {
+        let status = label(trailing, 12, weight: .semibold, color: trailingColor)
+        return rowBase(title: title, detail: detail, monoDetail: monoDetail,
+                       trailing: status)
+    }
+
+    private func actionRow(title: String, detail: String?, buttonTitle: String,
+                           action: Selector) -> NSView {
+        let button = NSButton(title: buttonTitle, target: self, action: action)
+        button.bezelStyle = .rounded
+        return rowBase(title: title, detail: detail, trailing: button)
+    }
+
+    private func switchRow(title: String, detail: String?, isOn: Bool,
+                           action: Selector) -> (NSView, NSSwitch) {
+        let sw = NSSwitch()
+        sw.state = isOn ? .on : .off
+        sw.target = self
+        sw.action = action
+        sw.setAccessibilityLabel(title)
+        return (rowBase(title: title, detail: detail, trailing: sw), sw)
+    }
+
+    private func stepperRow(title: String, detail: String?, id: String,
+                            min: Double, max: Double, step: Double, value: Double,
+                            format: @escaping (Int) -> String) -> NSView {
+        let readout = label(format(Int(value.rounded())), 12, weight: .semibold,
+                            color: .secondaryLabelColor, mono: true)
+        let stepper = NSStepper()
+        stepper.identifier = NSUserInterfaceItemIdentifier(rawValue: id)
+        stepper.minValue = min
+        stepper.maxValue = max
+        stepper.increment = step
+        stepper.doubleValue = value
+        stepper.valueWraps = false
+        stepper.target = self
+        stepper.action = #selector(stepperChanged(_:))
+        stepper.setAccessibilityLabel(title)
+        stepper.setAccessibilityValue(format(Int(value.rounded())))
+        stepper.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
+        stepperRows.append((stepper, readout, format))
+
+        let cluster = NSStackView(views: [readout, stepper])
+        cluster.spacing = 8
+        return rowBase(title: title, detail: detail, trailing: cluster)
+    }
+
+    // MARK: Sections
+
+    private func buildGeneral() -> [NSView] {
+        let (track, sw) = switchRow(title: "Track activity",
+                                    detail: "Pause accrual without quitting — nothing is logged while off",
+                                    isOn: activity.enabled,
+                                    action: #selector(toggleTracking(_:)))
+        trackingSwitch = sw
+        let (login, _) = switchRow(title: "Launch at Login",
+                                   detail: "Start Tally when you sign in",
+                                   isOn: LoginItem.isEnabled,
+                                   action: #selector(toggleLogin(_:)))
+        let updates = actionRow(title: "Check for updates",
+                                detail: "The signed appcast is Tally's only network call — tracking itself never phones home",
+                                buttonTitle: "Check Now",
+                                action: #selector(checkUpdates(_:)))
+        return [cardGroup([track, login]), cardGroup([updates])]
+    }
+
+    private func buildTracking() -> [NSView] {
+        let idle = stepperRow(title: "Idle threshold",
+                              detail: "Time away from the Mac before tracking pauses",
+                              id: "idle",
+                              min: 30, max: 600, step: 30,
+                              value: UserDefaults.standard.double(forKey: ActivityDefaults.idleThreshold),
+                              format: { "\($0) s" })
+        let rules = infoRow(title: "Classification rules",
+                            detail: "First matching pattern wins — patterns are managed from the panel's Category rules card",
+                            trailing: "In panel")
+        let privacy = rowBase(title: "Privacy",
+                              detail: "1Password & Keychain logged title-less as Private. Window titles never leave this Mac.",
+                              trailing: NSView())
+        return [cardGroup([idle]), cardGroup([rules, privacy])]
+    }
+
+    private func buildFocus() -> [NSView] {
+        let focusRow = stepperRow(title: "Focus length",
+                                  detail: "Minutes per focus session",
+                                  id: "focus", min: 5, max: 60, step: 1,
+                                  value: focus.focusMinutes, format: { "\($0) min" })
+        let breakRow = stepperRow(title: "Break length",
+                                  detail: "Minutes per short break",
+                                  id: "break", min: 1, max: 15, step: 1,
+                                  value: focus.breakMinutes, format: { "\($0) min" })
+        let longRow = stepperRow(title: "Long break",
+                                 detail: "Minutes per long break",
+                                 id: "long", min: 5, max: 30, step: 1,
+                                 value: focus.longBreakMinutes, format: { "\($0) min" })
+        let cadenceRow = stepperRow(title: "Long-break cadence",
+                                    detail: "Focus sessions before a long break",
+                                    id: "cadence", min: 2, max: 6, step: 1,
+                                    value: Double(focus.longBreakCadence),
+                                    format: { "every \($0)" })
+        return [cardGroup([focusRow, breakRow, longRow, cadenceRow])]
+    }
+
+    private func buildLicense() -> [NSView] {
+        let free = infoRow(title: "Free tier", detail: "7 days of history",
+                           trailing: LicenseManager.shared.isPro ? "" : "Current")
+        let pro = infoRow(title: "Pro",
+                          detail: "Unlimited + all updates — $9.99 one-time",
+                          trailing: LicenseManager.shared.isPro ? "Current" : "")
+        let buy = actionRow(title: "Buy Pro",
+                            detail: "One-time purchase — the key arrives by email",
+                            buttonTitle: "Buy Pro",
+                            action: #selector(buyProTapped(_:)))
+
+        var stateRows: [NSView] = []
+        if LicenseManager.shared.isPro, let lic = LicenseManager.shared.license {
+            stateRows.append(infoRow(title: "Status", detail: lic.email,
+                                     trailing: "Pro", trailingColor: .systemGreen))
+            stateRows.append(actionRow(title: "Deactivate",
+                                       detail: "Removes the key from this Mac",
+                                       buttonTitle: "Deactivate",
+                                       action: #selector(deactivateTapped(_:))))
+        } else {
+            let field = NSTextField()
+            field.placeholderString = "License key"
+            field.font = .systemFont(ofSize: 12)
+            field.bezelStyle = .roundedBezel
+            field.target = self
+            field.action = #selector(activateTapped(_:))
+            field.widthAnchor.constraint(equalToConstant: 220).isActive = true
+            field.setAccessibilityLabel("License key")
+            licenseKeyField = field
+            let activate = NSButton(title: "Activate", target: self,
+                                    action: #selector(activateTapped(_:)))
+            activate.bezelStyle = .rounded
+            let cluster = NSStackView(views: [field, activate])
+            cluster.spacing = 8
+            stateRows.append(rowBase(title: "License key",
+                                     detail: "Paste the key from your purchase email",
+                                     trailing: cluster))
+            let error = label("Invalid license key", 11, color: .systemRed)
+            error.isHidden = true
+            licenseError = error
+            stateRows.append(error)
+        }
+        return [cardGroup([free, pro, buy]), cardGroup(stateRows)]
+    }
+
+    private func buildAbout() -> [NSView] {
+        let icon = NSImageView(image: NSImage(systemSymbolName: "chart.bar",
+                                              accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = Theme.accent
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 48, weight: .regular)
+        let wordmark = label(Theme.wordmark, 15)
+        wordmark.font = roundedFont(15, .heavy)
+        let version = label(Theme.version, 11, weight: .semibold,
+                            color: .secondaryLabelColor, mono: true)
+        let tagline = label(Theme.tagline, 12, color: .secondaryLabelColor)
+
+        let support = LinkButton(title: "Support ↗", target: self,
+                                 action: #selector(openSupport(_:)))
+        support.bezelStyle = .inline
+        support.font = .systemFont(ofSize: 12)
+        support.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
+
+        let copyright = label("© 2026 Sashay Portfolio — local-only, zero telemetry.",
+                              11, color: .tertiaryLabelColor)
+
+        let column = NSStackView(views: [icon, wordmark, version, tagline, support, copyright])
+        column.orientation = .vertical
+        column.alignment = .centerX
+        column.spacing = 8
+        [wordmark, version, tagline, support, copyright].forEach {
+            $0.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+        }
+        column.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+
+        let holder = NSView()
+        holder.addSubview(column)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            column.centerXAnchor.constraint(equalTo: holder.centerXAnchor),
+            column.topAnchor.constraint(equalTo: holder.topAnchor, constant: 32),
+            column.bottomAnchor.constraint(lessThanOrEqualTo: holder.bottomAnchor,
+                                           constant: -16),
+        ])
+        return [holder]
+    }
+
+    // MARK: Wiring
+
+    private func wireState() {
+        activity.$enabled
+            .receive(on: RunLoop.main)
+            .sink { [weak self] on in
+                self?.trackingSwitch?.state = on ? .on : .off
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: .licenseChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.section == .license else { return }
+                self.rebuildPane()
+            }
+            .store(in: &cancellables)
+    }
+
+    // MARK: Actions
+
+    @objc private func navTapped(_ button: NavButton) { select(button.section) }
+
+    @objc private func toggleTracking(_ sw: NSSwitch) {
+        activity.enabled = sw.state == .on
+        announce(sw.state == .on ? "Tracking resumed" : "Tracking paused")
+    }
+
+    @objc private func toggleLogin(_ sw: NSSwitch) { LoginItem.setEnabled(sw.state == .on) }
+
+    @objc private func checkUpdates(_ sender: NSButton) { updater.checkForUpdates(sender) }
+
+    @objc private func stepperChanged(_ stepper: NSStepper) {
+        let v = Int(stepper.doubleValue.rounded())
+        switch stepper.identifier?.rawValue {
+        case "idle":
+            UserDefaults.standard.set(stepper.doubleValue, forKey: ActivityDefaults.idleThreshold)
+        case "focus": focus.focusMinutes = Double(v)
+        case "break": focus.breakMinutes = Double(v)
+        case "long": focus.longBreakMinutes = Double(v)
+        case "cadence": focus.longBreakCadence = v
+        default: break
+        }
+        if let row = stepperRows.first(where: { $0.stepper == stepper }) {
+            row.readout.stringValue = row.format(v)
+            stepper.setAccessibilityValue(row.format(v))
+        }
+    }
+
+    @objc private func buyProTapped(_ sender: NSButton) {
+        if let url = URL(string: "https://buy.stripe.com/9B6cMY0Tnf3ygn8dCR4Vy01") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func activateTapped(_ sender: Any?) {
+        guard let field = licenseKeyField else { return }
+        if LicenseManager.shared.activate(field.stringValue) {
+            announce("Pro activated")
+        } else {
+            licenseError?.isHidden = false
+            announce("Invalid license key")
+        }
+    }
+
+    @objc private func deactivateTapped(_ sender: NSButton) {
+        LicenseManager.shared.deactivate()
+    }
+
+    @objc private func openSupport(_ sender: Any?) {
+        if let url = URL(string: "https://github.com/jazinski/sashay-support") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func announce(_ text: String) {
+        guard let element = window?.contentView else { return }
+        NSAccessibility.post(element: element, notification: .announcementRequested,
+                             userInfo: [NSAccessibility.NotificationUserInfoKey.announcement: text])
+    }
+
+    // MARK: Keyboard navigation
+
+    /// NSWindowController sits in the responder chain after the window, so
+    /// unconsumed ↑/↓ land here and walk the sidebar selection.
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 126: moveSelection(-1)
+        case 125: moveSelection(1)
+        default: super.keyDown(with: event)
+        }
+    }
+
+    private func moveSelection(_ delta: Int) {
+        let order = Section.allCases
+        guard let current = order.firstIndex(of: section) else { return }
+        select(order[(current + delta + order.count) % order.count])
+    }
+
+    // MARK: NSWindowDelegate
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async { self.onTeardown?() }
+    }
+}
+
+/// Source-list nav item. Active: amber-tinted rounded fill, amber semibold
+/// title, accent-tinted template symbol (mockup `.nav.active`).
+private final class NavButton: NSButton {
+    let section: SettingsWindowController.Section
+    var isActive = false { didSet { render() } }
+
+    init(section: SettingsWindowController.Section, target: AnyObject?, action: Selector) {
+        self.section = section
+        super.init(frame: .zero)
+        isBordered = false
+        alignment = .left
+        imagePosition = .imageLeading
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        self.target = target
+        self.action = action
+        heightAnchor.constraint(equalToConstant: 32).isActive = true
+        setAccessibilityRole(.radioButton)
+        setAccessibilityLabel("Settings, \(section.title) section")
+        render()
+    }
+
+    required init?(coder: NSCoder) { fatalError("nope") }
+
+    private func render() {
+        contentTintColor = isActive ? Theme.accent : .secondaryLabelColor
+        layer?.backgroundColor = isActive
+            ? Theme.accent.withAlphaComponent(0.14).cgColor : nil
+        attributedTitle = NSAttributedString(
+            string: section.title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: isActive ? .semibold : .regular),
+                .foregroundColor: isActive ? Theme.accent : NSColor.secondaryLabelColor,
+            ])
+    }
+}
+
+/// Arrows drive sidebar navigation, never pane scrolling.
+private final class PaneScrollView: NSScrollView {
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 125 || event.keyCode == 126 {
+            nextResponder?.keyDown(with: event)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -900,6 +1589,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activity: ActivityEngine!
     private var focus: FocusEngine!
     private var panel: PanelController!
+    private var settings: SettingsWindowController?
+    private var cmdCommaMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
     private let updater = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
@@ -943,6 +1634,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.applyStatusPresentation() }.store(in: &cancellables)
         activity.$enabled.receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.applyStatusPresentation() }.store(in: &cancellables)
+
+        // ⌘, opens Settings whenever Tally is active — popover included.
+        cmdCommaMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self,
+                  event.modifierFlags.contains(.command),
+                  event.charactersIgnoringModifiers == "," else { return event }
+            self.openSettings()
+            return nil
+        }
     }
 
     /// Menu-bar symbol law: outline template symbols. chart.bar normally,
@@ -967,8 +1668,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePopover() {
         guard let button = statusItem.button else { return }
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            let menu = NSMenu()
+            let settingsItem = NSMenuItem(title: "Settings…",
+                                          action: #selector(openSettings),
+                                          keyEquivalent: ",")
+            settingsItem.target = self
+            menu.addItem(settingsItem)
+            menu.addItem(.separator())
+            let quitItem = NSMenuItem(title: "Quit Tally",
+                                      action: #selector(NSApplication.terminate(_:)),
+                                      keyEquivalent: "q")
+            quitItem.target = NSApp
+            menu.addItem(quitItem)
+            // Pop the menu once without replacing the button's click action.
+            statusItem.menu = menu
+            button.performClick(nil)
+            statusItem.menu = nil
+            return
+        }
         if popover.isShown { popover.performClose(button) }
         else { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+    }
+
+    @objc func openSettings() {
+        if settings == nil {
+            let controller = SettingsWindowController(activity: activity, focus: focus,
+                                                       updater: updater)
+            controller.onTeardown = { [weak self] in self?.settings = nil }
+            settings = controller
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settings?.showWindow(nil)
     }
 }
 
