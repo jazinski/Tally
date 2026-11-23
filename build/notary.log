@@ -2,13 +2,13 @@
 ▸ Submitting Tally to Apple — waits for approval (usually 2–15 min)…
 Conducting pre-submission checks for Tally-0.1.0-notary.zip and initiating connection to the Apple notary service...
 Submission ID received
-  id: 61f8a2aa-cd53-44f3-9a5c-5955c1a4ee9e
+  id: 858a0b98-fab1-4ca3-b427-227f546f16b8
 Successfully uploaded file
-  id: 61f8a2aa-cd53-44f3-9a5c-5955c1a4ee9e
+  id: 858a0b98-fab1-4ca3-b427-227f546f16b8
   path: /Users/cjazinski/Tally/build/Tally-0.1.0-notary.zip
 Waiting for processing to complete.
 Current status: In Progress...Current status: In Progress....Current status: In Progress.....Current status: Accepted......Processing complete
-  id: 61f8a2aa-cd53-44f3-9a5c-5955c1a4ee9e
+  id: 858a0b98-fab1-4ca3-b427-227f546f16b8
   status: Accepted
 
 ▸ Stapling ticket…

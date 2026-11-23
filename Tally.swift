@@ -1536,18 +1536,40 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 private final class NavButton: NSButton {
     let section: SettingsWindowController.Section
     var isActive = false { didSet { render() } }
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
 
     init(section: SettingsWindowController.Section, target: AnyObject?, action: Selector) {
         self.section = section
         super.init(frame: .zero)
         isBordered = false
-        alignment = .left
-        imagePosition = .imageLeading
-        imagePadding = 4
+        title = ""
         wantsLayer = true
         layer?.cornerRadius = 8
-        image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+
+        iconView.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(iconView)
+        addSubview(titleLabel)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 18),
+            iconView.heightAnchor.constraint(equalToConstant: 18),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+        ])
+
+        if section.isNew { addBadge() }
         self.target = target
         self.action = action
         heightAnchor.constraint(equalToConstant: 36).isActive = true
@@ -1559,15 +1581,24 @@ private final class NavButton: NSButton {
     required init?(coder: NSCoder) { fatalError("nope") }
 
     private func render() {
-        contentTintColor = isActive ? Theme.accent : .secondaryLabelColor
+        iconView.contentTintColor = isActive ? Theme.accent : .secondaryLabelColor
         layer?.backgroundColor = isActive
             ? Theme.accent.withAlphaComponent(0.14).cgColor : nil
-        attributedTitle = NSAttributedString(
-            string: "   \(section.title)",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: isActive ? .semibold : .regular),
-                .foregroundColor: isActive ? Theme.accent : NSColor.secondaryLabelColor,
-            ])
+        titleLabel.font = .systemFont(ofSize: 13, weight: isActive ? .semibold : .regular)
+        titleLabel.textColor = isActive ? Theme.accent : .secondaryLabelColor
+        titleLabel.stringValue = section.title
+    }
+
+    private func addBadge() {
+        let badge = NSTextField(labelWithString: "NEW")
+        badge.font = .systemFont(ofSize: 11, weight: .semibold)
+        badge.textColor = .secondaryLabelColor
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(badge)
+        NSLayoutConstraint.activate([
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 }
 
