@@ -1106,7 +1106,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let heading = NSTextField(labelWithString: section.title)
         heading.attributedStringValue = NSAttributedString(
-            string: section.title,
+            string: "   \(section.title)",
             attributes: [.font: NSFont.systemFont(ofSize: 19, weight: .bold),
                          .kern: -0.4,
                          .foregroundColor: NSColor.labelColor])
@@ -1543,13 +1543,14 @@ private final class NavButton: NSButton {
         isBordered = false
         alignment = .left
         imagePosition = .imageLeading
+        imagePadding = 4
         wantsLayer = true
         layer?.cornerRadius = 8
         image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
         self.target = target
         self.action = action
-        heightAnchor.constraint(equalToConstant: 32).isActive = true
+        heightAnchor.constraint(equalToConstant: 36).isActive = true
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel("Settings, \(section.title) section")
         render()
@@ -1562,7 +1563,7 @@ private final class NavButton: NSButton {
         layer?.backgroundColor = isActive
             ? Theme.accent.withAlphaComponent(0.14).cgColor : nil
         attributedTitle = NSAttributedString(
-            string: section.title,
+            string: "   \(section.title)",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 13, weight: isActive ? .semibold : .regular),
                 .foregroundColor: isActive ? Theme.accent : NSColor.secondaryLabelColor,
@@ -1620,6 +1621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = chartIcon
         statusItem.button?.imagePosition = .imageLeading
+        imagePadding = 4
         statusItem.button?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         statusItem.button?.toolTip = "Tally"
         statusItem.button?.action = #selector(togglePopover)
