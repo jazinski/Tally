@@ -1119,7 +1119,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         document.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: document.bottomAnchor,
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor,
                                           constant: -20),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
@@ -1652,7 +1652,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = chartIcon
         statusItem.button?.imagePosition = .imageLeading
-        imagePadding = 4
         statusItem.button?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         statusItem.button?.toolTip = "Tally"
         statusItem.button?.action = #selector(togglePopover)
@@ -1733,8 +1732,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
     }
 }
+
+
+
+    private func setupEditMenu() {
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.items = [
+            NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"),
+            NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"),
+            NSMenuItem.separator(),
+            NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
+            NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
+            NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
+            NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"),
+        ]
+        let mainMenu = NSMenu()
+        let editItem = NSMenuItem()
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+        NSApplication.shared.mainMenu = mainMenu
+    }
 
 #if !SKIP_APP_MAIN
 @main
